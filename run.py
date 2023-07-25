@@ -16,7 +16,7 @@ import functools
 import custom_datasets
 from multiprocessing.pool import ThreadPool
 import time
-
+import math
 
 
 # 15 colorblind-friendly colors
@@ -375,12 +375,18 @@ def get_entropy(text):
 
 
 def get_roc_metrics(real_preds, sample_preds):
+    real_preds =  [element for element in real_preds if not math.isnan(element)]
+    sample_preds = [element for element in sample_preds if not math.isnan(element)]
+
     fpr, tpr, _ = roc_curve([0] * len(real_preds) + [1] * len(sample_preds), real_preds + sample_preds)
     roc_auc = auc(fpr, tpr)
     return fpr.tolist(), tpr.tolist(), float(roc_auc)
 
 
 def get_precision_recall_metrics(real_preds, sample_preds):
+    real_preds =  [element for element in real_preds if not math.isnan(element)]
+    sample_preds = [element for element in sample_preds if not math.isnan(element)]
+
     precision, recall, _ = precision_recall_curve([0] * len(real_preds) + [1] * len(sample_preds), real_preds + sample_preds)
     pr_auc = auc(recall, precision)
     return precision.tolist(), recall.tolist(), float(pr_auc)
@@ -645,6 +651,7 @@ def generate_samples(raw_data, batch_size):
         "sampled": [],
     }
 
+    seq_lens = []
     for batch in range(len(raw_data) // batch_size):
         print('Generating samples for batch', batch, 'of', len(raw_data) // batch_size)
         original_text = raw_data[batch * batch_size:(batch + 1) * batch_size]
@@ -657,17 +664,30 @@ def generate_samples(raw_data, batch_size):
 
             o, s = trim_to_shorter_length(o, s)
 
+
             # add to the data
-            data["original"].append(o)
-            data["sampled"].append(s)
-    
+            assert len(o.split(' ')) == len(s.split(' '))
+            seq_lens.append(len(o.split(' ')))
+
+            if args.tok_by_tok:
+                for tok_cnt in range(len(o.split(' '))):
+
+                    data["original"].append(' '.join(o.split(' ')[:tok_cnt+1]))
+                    data["sampled"].append(' '.join(s.split(' ')[:tok_cnt+1]))
+            else:
+                data["original"].append(o)
+                data["sampled"].append(s)
+    if args.tok_by_tok:
+        n_samples = len(data["original"])
+    else:
+        n_samples = args.n_samples
     if args.pre_perturb_pct > 0:
         print(f'APPLYING {args.pre_perturb_pct}, {args.pre_perturb_span_length} PRE-PERTURBATIONS')
         load_mask_model()
         data["sampled"] = perturb_texts(data["sampled"], args.pre_perturb_span_length, args.pre_perturb_pct, ceil_pct=True)
         load_base_model()
 
-    return data
+    return data, seq_lens, n_samples
 
 
 def generate_data(dataset, key):
@@ -680,7 +700,7 @@ def generate_data(dataset, key):
         #data_files ="/home/niloofar/projects/maildir"
         #data = datasets.load_dataset("json", data_files=data_files, split="train", cache_dir=cache_dir)[key]
         #data = datasets.load_dataset("json",data_files=data_files, split='train', cache_dir=cache_dir)[key]https://the-eye.eu/public/AI/pile/train/00.jsonl.zst"
-        data = datasets.load_dataset("json", data_files="/home/niloofar/projects/PUBMED_title_abstracts_2019_baseline.jsonl.zst",  split="train")[key]
+        data = datasets.load_dataset("json", data_files="/home/niloofar/projects/PUBMED_title_abstracts_2019_baseline.jsonl.zst",  split="train[:10000]")[key]
 
     else:
         data = datasets.load_dataset(dataset, split='train', cache_dir=cache_dir)[key]
@@ -839,6 +859,9 @@ if __name__ == '__main__':
     parser.add_argument('--random_fills_tokens', action='store_true')
     parser.add_argument('--cache_dir', type=str, default="/trunk/model-hub")
     parser.add_argument('--ref_model', type=str, default=None)
+
+    parser.add_argument('--tok_by_tok', action='store_true')
+
     parser.add_argument('--max_tries', type=int, default=100)
     parser.add_argument('--max_length', type=int, default=None)
     parser.add_argument('--ceil_pct', action='store_true')
@@ -868,9 +891,16 @@ if __name__ == '__main__':
     scoring_model_string = (f"-{args.scoring_model_name}" if args.scoring_model_name else "").replace('/', '_')
 #    SAVE_FOLDER = f"tmp_results/{output_subfolder}{base_model_name}{scoring_model_string}-{args.mask_filling_model_name}-{sampling_string}/{START_DATE}-{START_TIME}-{precision_string}-{args.pct_words_masked}-{args.n_perturbation_rounds}-{args.dataset}-{args.n_samples}"
     if args.ref_model is not None:
-        ref_model_string = f'--{args.ref_model}'
+        ref_s=args.ref_model.replace('/', '_')
+        ref_model_string = f'--ref_{ref_s}'
     else:
         ref_model_string = ""
+
+    
+    if args.tok_by_tok:
+        tok_by_tok_string = '--tok_true'
+    else:
+        tok_by_tok_string = '--tok_false'
 
     if args.span_length ==2 :
         span_length_string = ""
@@ -882,7 +912,7 @@ if __name__ == '__main__':
     else:
         max_length_string = ""
 
-    SAVE_FOLDER = f"tmp_results/{output_subfolder}{base_model_name}-{args.revision}{scoring_model_string}-{args.mask_filling_model_name}-{sampling_string}/{precision_string}-{args.pct_words_masked}-{args.n_perturbation_rounds}-{args.dataset}-{args.n_samples}{ref_model_string}{span_length_string}{max_length_string}"
+    SAVE_FOLDER = f"tmp_results/{output_subfolder}{base_model_name}-{args.revision}{scoring_model_string}-{args.mask_filling_model_name}-{sampling_string}/{precision_string}-{args.pct_words_masked}-{args.n_perturbation_rounds}-{args.dataset}-{args.n_samples}{ref_model_string}{span_length_string}{max_length_string}{tok_by_tok_string}"
 
     new_folder = SAVE_FOLDER.replace("tmp_results", "results")
     ##don't run if exists!!!
@@ -947,7 +977,8 @@ if __name__ == '__main__':
     load_base_model()
 
     print(f'Loading dataset {args.dataset}...')
-    data = generate_data(args.dataset, args.dataset_key)
+    data, seq_lens, n_samples = generate_data(args.dataset, args.dataset_key)
+    print("NEW N_SAMPLES IS ", n_samples)
     if args.random_fills:
         FILL_DICTIONARY = set()
         for texts in data.values():
@@ -967,6 +998,10 @@ if __name__ == '__main__':
     with open(os.path.join(SAVE_FOLDER, "raw_data.json"), "w") as f:
         print(f"Writing raw data to {os.path.join(SAVE_FOLDER, 'raw_data.json')}")
         json.dump(data, f)
+
+    with open(os.path.join(SAVE_FOLDER, "raw_data_lens.json"), "w") as f:
+        print(f"Writing raw data to {os.path.join(SAVE_FOLDER, 'raw_data_lens.json')}")
+        json.dump(seq_lens, f)
 
     if not args.skip_baselines:
         baseline_outputs = [run_baseline_threshold_experiment(get_ll, "likelihood", n_samples=n_samples)]

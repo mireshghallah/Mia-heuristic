@@ -1,2 +1,4 @@
 results/*
 cross_results/*
+tmp_results/*
+__pycache__/*
