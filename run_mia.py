@@ -18,6 +18,15 @@ from multiprocessing.pool import ThreadPool
 import time
 import math
 
+#### H3 added ##################
+import sys
+sys.path.append("./models/H3")
+from models.H3.src.models.ssm_seq import SSMLMHeadModel
+#### H3 added ##################
+
+torch.manual_seed(0)
+np.random.seed(0)
+random.seed(0)
 
 # 15 colorblind-friendly colors
 COLORS = ["#0072B2", "#009E73", "#D55E00", "#CC79A7", "#F0E442",
@@ -85,7 +94,6 @@ def tokenize_and_mask(text, span_length, pct, ceil_pct=False):
         if mask_string not in tokens[search_start:search_end]:
             tokens[start:end] = [mask_string]
             n_masks += 1
-        #print(start,end,search_start,search_end, n_spans,n_masks,len(tokens),span_length)
     
     # replace each occurrence of mask_string with <extra_id_NUM>, where NUM increments
     num_filled = 0
@@ -256,7 +264,11 @@ def sample_from_model(texts, min_words=55, prompt_tokens=30, max_length=200):
             min_length = 50 if args.dataset in ['pubmed'] else 150
             if args.max_length is not None:
                 min_length = 10
-            outputs = base_model.generate(**all_encoded, min_length=min_length, max_length=max_length, do_sample=True, **sampling_kwargs, pad_token_id=base_tokenizer.eos_token_id, eos_token_id=base_tokenizer.eos_token_id)
+            #outputs = base_model.generate(**all_encoded, min_length=min_length, max_length=max_length, do_sample=True, **sampling_kwargs, pad_token_id=base_tokenizer.eos_token_id, eos_token_id=base_tokenizer.eos_token_id)
+            if 'H3' in args.base_model_name and 'attention_mask' in all_encoded.keys():
+                del all_encoded['attention_mask']
+            #removed minlen and attention mask min_length=min_length, max_length=200, do_sample=True,pad_token_id=base_tokenizer.eos_token_id,
+            outputs = base_model.generate(**all_encoded,  max_length=200,  **sampling_kwargs,  eos_token_id=base_tokenizer.eos_token_id)
             decoded = base_tokenizer.batch_decode(outputs, skip_special_tokens=True)
             tries += 1
 
@@ -294,7 +306,10 @@ def get_ll(text):
         return np.mean(logprobs)
     else:
         with torch.no_grad():
+
             tokenized = base_tokenizer(text, return_tensors="pt").to(DEVICE)
+            if "H3" in args.base_model_name: 
+                del tokenized['attention_mask']
             labels = tokenized.input_ids
             return -base_model(**tokenized, labels=labels).loss.item()
 
@@ -315,6 +330,7 @@ def get_lira(text):
     else:
         with torch.no_grad():
             tokenized = base_tokenizer(text, return_tensors="pt").to(DEVICE)
+            del tokenized['attention_mask']
             labels = tokenized.input_ids
             tokenized_ref = ref_tokenizer(text, return_tensors="pt").to(DEVICE)
             labels_ref = tokenized_ref.input_ids
@@ -343,6 +359,8 @@ def get_rank(text, log=False):
 
     with torch.no_grad():
         tokenized = base_tokenizer(text, return_tensors="pt").to(DEVICE)
+        if "H3" in args.base_model_name: 
+            del tokenized['attention_mask']        
         logits = base_model(**tokenized).logits[:,:-1]
         labels = tokenized.input_ids[:,1:]
 
@@ -368,7 +386,10 @@ def get_entropy(text):
     assert args.openai_model is None, "get_entropy not implemented for OpenAI models"
 
     with torch.no_grad():
+        
         tokenized = base_tokenizer(text, return_tensors="pt").to(DEVICE)
+        if "H3" in args.base_model_name: 
+            del tokenized['attention_mask']
         logits = base_model(**tokenized).logits[:,:-1]
         neg_entropy = F.softmax(logits, dim=-1) * F.log_softmax(logits, dim=-1)
         return -neg_entropy.sum(-1).mean().item()
@@ -423,13 +444,13 @@ def save_ll_histograms(experiments):
             # plot histogram of sampled/perturbed sampled on left, original/perturbed original on right
             plt.figure(figsize=(20, 6))
             plt.subplot(1, 2, 1)
-            plt.hist([r["sampled_ll"] for r in results], alpha=0.5, bins='auto', label='sampled')
+            plt.hist([r["sampled_ll"] for r in results], alpha=0.5, bins='auto', label='member')
             plt.hist([r["perturbed_sampled_ll"] for r in results], alpha=0.5, bins='auto', label='perturbed sampled')
             plt.xlabel("log likelihood")
             plt.ylabel('count')
             plt.legend(loc='upper right')
             plt.subplot(1, 2, 2)
-            plt.hist([r["original_ll"] for r in results], alpha=0.5, bins='auto', label='original')
+            plt.hist([r["original_ll"] for r in results], alpha=0.5, bins='auto', label='nonmember')
             plt.hist([r["perturbed_original_ll"] for r in results], alpha=0.5, bins='auto', label='perturbed original')
             plt.xlabel("log likelihood")
             plt.ylabel('count')
@@ -456,8 +477,8 @@ def save_llr_histograms(experiments):
                 r["sampled_llr"] = r["sampled_ll"] - r["perturbed_sampled_ll"]
                 r["original_llr"] = r["original_ll"] - r["perturbed_original_ll"]
             
-            plt.hist([r["sampled_llr"] for r in results], alpha=0.5, bins='auto', label='sampled')
-            plt.hist([r["original_llr"] for r in results], alpha=0.5, bins='auto', label='original')
+            plt.hist([r["sampled_llr"] for r in results], alpha=0.5, bins='auto', label='member')
+            plt.hist([r["original_llr"] for r in results], alpha=0.5, bins='auto', label='nonmember')
             plt.xlabel("log likelihood ratio")
             plt.ylabel('count')
             plt.legend(loc='upper right')
@@ -473,8 +494,8 @@ def get_perturbation_results(span_length=10, n_perturbations=1, n_samples=500):
     np.random.seed(0)
 
     results = []
-    original_text = data["original"]
-    sampled_text = data["sampled"]
+    original_text = data["nonmember"]
+    sampled_text = data["member"]
 
     if args.ceil_pct:
         ceil_pct=True
@@ -496,8 +517,8 @@ def get_perturbation_results(span_length=10, n_perturbations=1, n_samples=500):
 
     for idx in range(len(original_text)):
         results.append({
-            "original": original_text[idx],
-            "sampled": sampled_text[idx],
+            "nonmember": original_text[idx],
+            "member": sampled_text[idx],
             "perturbed_sampled": p_sampled_text[idx * n_perturbations: (idx + 1) * n_perturbations],
             "perturbed_original": p_original_text[idx * n_perturbations: (idx + 1) * n_perturbations]
         })
@@ -508,8 +529,8 @@ def get_perturbation_results(span_length=10, n_perturbations=1, n_samples=500):
     for res in tqdm.tqdm(results, desc="Computing log likelihoods"):
         p_sampled_ll = get_lls(res["perturbed_sampled"])
         p_original_ll = get_lls(res["perturbed_original"])
-        res["original_ll"] = get_ll(res["original"])
-        res["sampled_ll"] = get_ll(res["sampled"])
+        res["original_ll"] = get_ll(res["nonmember"])
+        res["sampled_ll"] = get_ll(res["member"])
         res["all_perturbed_sampled_ll"] = p_sampled_ll
         res["all_perturbed_original_ll"] = p_original_ll
         res["perturbed_sampled_ll"] = np.mean(p_sampled_ll)
@@ -532,12 +553,12 @@ def run_perturbation_experiment(results, criterion, span_length=10, n_perturbati
                 res['perturbed_original_ll_std'] = 1
                 print("WARNING: std of perturbed original is 0, setting to 1")
                 print(f"Number of unique perturbed original texts: {len(set(res['perturbed_original']))}")
-                print(f"Original text: {res['original']}")
+                print(f"Original text: {res['nonmember']}")
             if res['perturbed_sampled_ll_std'] == 0:
                 res['perturbed_sampled_ll_std'] = 1
                 print("WARNING: std of perturbed sampled is 0, setting to 1")
                 print(f"Number of unique perturbed sampled texts: {len(set(res['perturbed_sampled']))}")
-                print(f"Sampled text: {res['sampled']}")
+                print(f"Sampled text: {res['member']}")
             predictions['real'].append((res['original_ll'] - res['perturbed_original_ll']) / res['perturbed_original_ll_std'])
             predictions['samples'].append((res['sampled_ll'] - res['perturbed_sampled_ll']) / res['perturbed_sampled_ll_std'])
 
@@ -575,21 +596,21 @@ def run_baseline_threshold_experiment(criterion_fn, name, n_samples=500):
 
     results = []
     for batch in tqdm.tqdm(range(n_samples // batch_size), desc=f"Computing {name} criterion"):
-        original_text = data["original"][batch * batch_size:(batch + 1) * batch_size]
-        sampled_text = data["sampled"][batch * batch_size:(batch + 1) * batch_size]
+        original_text = data["nonmember"][batch * batch_size:(batch + 1) * batch_size]
+        sampled_text = data["member"][batch * batch_size:(batch + 1) * batch_size]
 
         for idx in range(len(original_text)):
             results.append({
-                "original": original_text[idx],
-                "original_crit": criterion_fn(original_text[idx]),
-                "sampled": sampled_text[idx],
-                "sampled_crit": criterion_fn(sampled_text[idx]),
+                "nonmember": original_text[idx],
+                "nonmember_crit": criterion_fn(original_text[idx]),
+                "member": sampled_text[idx],
+                "member_crit": criterion_fn(sampled_text[idx]),
             })
 
     # compute prediction scores for real/sampled passages
     predictions = {
-        'real': [x["original_crit"] for x in results],
-        'samples': [x["sampled_crit"] for x in results],
+        'real': [x["nonmember_crit"] for x in results],
+        'samples': [x["member_crit"] for x in results],
     }
 
     fpr, tpr, roc_auc = get_roc_metrics(predictions['real'], predictions['samples'])
@@ -643,24 +664,24 @@ def truncate_to_substring(text, substring, idx_occurrence):
     return text[:idx]
 
 
-def generate_samples(raw_data, batch_size):
+def generate_samples(raw_data_member, raw_data_non_member, batch_size):
     torch.manual_seed(42)
     np.random.seed(42)
     data = {
-        "original": [],
-        "sampled": [],
+        "nonmember": [],
+        "member": [],
     }
 
     seq_lens = []
-    for batch in range(len(raw_data) // batch_size):
-        print('Generating samples for batch', batch, 'of', len(raw_data) // batch_size)
-        original_text = raw_data[batch * batch_size:(batch + 1) * batch_size]
-        sampled_text = sample_from_model(original_text, min_words=30 if args.dataset in ['pubmed'] else 55,max_length=args.max_length if args.max_length is not None else 200)
+    for batch in range(len(raw_data_member) // batch_size):
+        print('Generating samples for batch', batch, 'of', len(raw_data_member) // batch_size)
+        non_member_text = raw_data_non_member[batch * batch_size:(batch + 1) * batch_size]
+        member_text = raw_data_member[batch * batch_size:(batch + 1) * batch_size]
+        #sampled_text = sample_from_model(original_text, min_words=30 if args.dataset in ['pubmed'] else 55,max_length=args.max_length if args.max_length is not None else 200)
 
-        for o, s in zip(original_text, sampled_text):
-            if args.dataset == 'pubmed':
-                s = truncate_to_substring(s, 'Question:', 2)
-                o = o.replace(custom_datasets.SEPARATOR, ' ')
+        #TODO make same len
+        for o, s in zip(non_member_text, member_text):
+
 
             o, s = trim_to_shorter_length(o, s)
 
@@ -672,38 +693,41 @@ def generate_samples(raw_data, batch_size):
             if args.tok_by_tok:
                 for tok_cnt in range(len(o.split(' '))):
 
-                    data["original"].append(' '.join(o.split(' ')[:tok_cnt+1]))
-                    data["sampled"].append(' '.join(s.split(' ')[:tok_cnt+1]))
+                    data["nonmember"].append(' '.join(o.split(' ')[:tok_cnt+1]))
+                    data["member"].append(' '.join(s.split(' ')[:tok_cnt+1]))
             else:
-                data["original"].append(o)
-                data["sampled"].append(s)
+                data["nonmember"].append(o)
+                data["member"].append(s)
     if args.tok_by_tok:
-        n_samples = len(data["original"])
+        n_samples = len(data["nonmember"])
     else:
         n_samples = args.n_samples
     if args.pre_perturb_pct > 0:
         print(f'APPLYING {args.pre_perturb_pct}, {args.pre_perturb_span_length} PRE-PERTURBATIONS')
         load_mask_model()
-        data["sampled"] = perturb_texts(data["sampled"], args.pre_perturb_span_length, args.pre_perturb_pct, ceil_pct=True)
+        data["member"] = perturb_texts(data["member"], args.pre_perturb_span_length, args.pre_perturb_pct, ceil_pct=True)
         load_base_model()
 
     return data, seq_lens, n_samples
 
 
-def generate_data(dataset, key):
+def generate_data(dataset,key,train=True):
     # load data
+    data_split = 'train' if train else 'test'
     if dataset in custom_datasets.DATASETS:
         data = custom_datasets.load(dataset, cache_dir)
-    elif dataset == 'the_pile':
+    elif dataset == 'the_pile' and data_split=='train':
         #data_files = "https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz"
         #data_files="/home/niloofar/projects/enron_mail_20150507.tar.gz"
         #data_files ="/home/niloofar/projects/maildir"
         #data = datasets.load_dataset("json", data_files=data_files, split="train", cache_dir=cache_dir)[key]
         #data = datasets.load_dataset("json",data_files=data_files, split='train', cache_dir=cache_dir)[key]https://the-eye.eu/public/AI/pile/train/00.jsonl.zst"
-        data = datasets.load_dataset("json", data_files="/home/niloofar/projects/PUBMED_title_abstracts_2019_baseline.jsonl.zst",  split="train[:10000]")[key]
-    #elif dataset == 'obenwebtest'
+        data = datasets.load_dataset("json", data_files="/trunk/datasets/niloofar/pile/00.jsonl.zst",  split=f"{data_split}[:10000]")[key]
+    elif dataset == 'the_pile' and data_split=='test':
+        print("test")
+        data = datasets.load_dataset("json", data_files="/trunk/datasets/niloofar/pile/test.jsonl.zst",split=f"train[:10000]")[key]
     else:
-        data = datasets.load_dataset(dataset, split='train[:10000]', cache_dir=cache_dir)[key]
+        data = datasets.load_dataset(dataset, split=f'train[:10000]', cache_dir=cache_dir)[key]
 
     # get unique examples, strip whitespace, and remove newlines
     # then take just the long examples, shuffle, take the first 5,000 to tokenize to save time
@@ -719,11 +743,16 @@ def generate_data(dataset, key):
     # remove newlines from each example
     data = [strip_newlines(x) for x in data]
 
-    # try to keep only examples with > 250 words
-    if dataset in ['writing', 'squad', 'xsum']:
-        long_data = [x for x in data if len(x.split()) > 250]
-        if len(long_data) > 0:
-            data = long_data
+    # try to keep only examples with > 100 words
+    #if dataset in ['writing', 'squad', 'xsum']:
+    long_data = [x for x in data if len(x.split()) > 100]
+    if len(long_data) > 0:
+        data = long_data
+
+    
+    not_too_long_data = [x for x in data if len(x.split()) < args.max_length]
+    if len(not_too_long_data) > 0:
+            data = not_too_long_data
 
     random.seed(0)
     random.shuffle(data)
@@ -739,10 +768,38 @@ def generate_data(dataset, key):
     print(f"Total number of samples: {len(data)}")
     print(f"Average number of words: {np.mean([len(x.split()) for x in data])}")
 
-    return generate_samples(data[:n_samples], batch_size=batch_size)
+    return data 
+
+    #return generate_samples(data[:n_samples], batch_size=batch_size)
 
 
 def load_base_model_and_tokenizer(name):
+    #### H3 added ################## 
+    if "H3" in name: 
+        device = 'cuda'
+        # make a seperate tokenizer for this?
+        tokenizer = transformers.GPT2Tokenizer.from_pretrained('gpt2', cache_dir=cache_dir)
+        tokenizer.pad_token = tokenizer.eos_token
+        d_model = args.dmodel
+        n_layer = args.nlayer
+        ssm_cfg = dict(mode='diag', measure='diag-lin')
+        attn_layer_idx = args.attn_layer_idx
+        if args.rotary_emb_dim is None:
+            attn_cfg = dict(num_heads=args.nheads)
+        else:
+            attn_cfg = dict(num_heads=args.nheads, rotary_emb_dim=args.rotary_emb_dim)
+        base_model = SSMLMHeadModel(d_model, n_layer=n_layer, d_inner=4 * d_model, vocab_size=len(tokenizer),
+                        ssm_cfg=ssm_cfg, attn_layer_idx=attn_layer_idx, attn_cfg=attn_cfg,
+                        pad_vocab_size_multiple=8).to(device=device)
+        if args.ckpt is not None:
+            state_dict = torch.load("models/"+args.ckpt, map_location=device)
+            if 'pytorch-lightning_version' in state_dict:
+                state_dict = {k[len('model.'):]: v for k, v in state_dict['state_dict'].items()
+                            if k.startswith('model.')}
+            base_model.load_state_dict(state_dict)
+        
+        return base_model, tokenizer
+    #### H3 added ##################
     if args.openai_model is None:
         print(f'Loading BASE model {name}...')
         base_model_kwargs = {'revision':args.revision}
@@ -758,7 +815,7 @@ def load_base_model_and_tokenizer(name):
     if "facebook/opt-" in name:
         print("Using non-fast tokenizer for OPT")
         optional_tok_kwargs['fast'] = False
-    if args.dataset in ['pubmed']:
+    if args.dataset_member in ['pubmed'] or args.dataset_nonmember in ['pubmed']:
         optional_tok_kwargs['padding_side'] = 'left'
     base_tokenizer = transformers.AutoTokenizer.from_pretrained(name, **optional_tok_kwargs, cache_dir=cache_dir)
     base_tokenizer.pad_token_id = base_tokenizer.eos_token_id
@@ -771,7 +828,7 @@ def eval_supervised(data, model):
     detector = transformers.AutoModelForSequenceClassification.from_pretrained(model, cache_dir=cache_dir).to(DEVICE)
     tokenizer = transformers.AutoTokenizer.from_pretrained(model, cache_dir=cache_dir)
 
-    real, fake = data['original'], data['sampled']
+    real, fake = data['nonmember'], data['member']
 
     with torch.no_grad():
         # get predictions for real
@@ -825,8 +882,10 @@ if __name__ == '__main__':
     DEVICE = "cuda"
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default="xsum")
-    parser.add_argument('--dataset_key', type=str, default="document")
+    parser.add_argument('--dataset_member', type=str, default="xsum")
+    parser.add_argument('--dataset_member_key', type=str, default="document")
+    parser.add_argument('--dataset_nonmember', type=str, default="xsum")
+    parser.add_argument('--dataset_nonmember_key', type=str, default="document")
     parser.add_argument('--pct_words_masked', type=float, default=0.3) # pct masked is actually pct_words_masked * (span_length / (span_length + 2 * buffer_size))
     parser.add_argument('--span_length', type=int, default=2)
     parser.add_argument('--n_samples', type=int, default=200)
@@ -865,6 +924,19 @@ if __name__ == '__main__':
     parser.add_argument('--max_tries', type=int, default=100)
     parser.add_argument('--max_length', type=int, default=None)
     parser.add_argument('--ceil_pct', action='store_true')
+
+
+
+
+#### H3 added ##################
+    parser.add_argument('--dmodel', type=int, default=2048)
+    parser.add_argument('--nlayer', type=int, default=24)
+    parser.add_argument('--attn-layer-idx', nargs='+', type=int, default=[8,16])
+    parser.add_argument('--rotary_emb_dim', type=int, default=None, help='For rotary embeddings, set to 64. Default is None.')
+    parser.add_argument('--nheads', type=int, default=16)
+    parser.add_argument('--ckpt', type=str, default=None)
+#### H3 added ##################
+
 
 
     args = parser.parse_args()
@@ -912,7 +984,10 @@ if __name__ == '__main__':
     else:
         max_length_string = ""
 
-    SAVE_FOLDER = f"tmp_results/{output_subfolder}{base_model_name}-{args.revision}{scoring_model_string}-{args.mask_filling_model_name}-{sampling_string}/{precision_string}-{args.pct_words_masked}-{args.n_perturbation_rounds}-{args.dataset}-{args.n_samples}{ref_model_string}{span_length_string}{max_length_string}{tok_by_tok_string}"
+    dataset_member_name=args.dataset_member.replace('/', '_')
+    dataset_nonmember_name=args.dataset_nonmember.replace('/', '_')
+
+    SAVE_FOLDER = f"tmp_results/{output_subfolder}{base_model_name}-{args.revision}{scoring_model_string}-{args.mask_filling_model_name}-{sampling_string}/{precision_string}-{args.pct_words_masked}-{args.n_perturbation_rounds}-{dataset_member_name}-{dataset_nonmember_name}-{args.n_samples}{ref_model_string}{span_length_string}{max_length_string}{tok_by_tok_string}"
 
     new_folder = SAVE_FOLDER.replace("tmp_results", "results")
     ##don't run if exists!!!
@@ -971,13 +1046,19 @@ if __name__ == '__main__':
         n_positions = 512
     preproc_tokenizer = transformers.AutoTokenizer.from_pretrained('t5-small', model_max_length=512, cache_dir=cache_dir)
     mask_tokenizer = transformers.AutoTokenizer.from_pretrained(mask_filling_model_name, model_max_length=n_positions, cache_dir=cache_dir)
-    if args.dataset in ['english', 'german']:
-        preproc_tokenizer = mask_tokenizer
+    # if args.dataset in ['english', 'german']:
+    #     preproc_tokenizer = mask_tokenizer
 
     load_base_model()
 
-    print(f'Loading dataset {args.dataset}...')
-    data, seq_lens, n_samples = generate_data(args.dataset, args.dataset_key)
+    print(f'Loading dataset {args.dataset_member} and {args.dataset_nonmember}...')
+    # data, seq_lens, n_samples = generate_data(args.dataset_member,args.dataset_member_key)
+    
+    data_member = generate_data(args.dataset_member,args.dataset_member_key)
+    data_nonmember  = generate_data( args.dataset_nonmember,  args.dataset_nonmember_key,train=False) 
+
+    data, seq_lens, n_samples = generate_samples(data_member[:n_samples], data_nonmember[:n_samples], batch_size=batch_size)
+
     print("NEW N_SAMPLES IS ", n_samples)
     if args.random_fills:
         FILL_DICTIONARY = set()
